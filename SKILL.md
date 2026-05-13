@@ -9,7 +9,7 @@ A root-cause diagnostic skill for **any** PC system. Use when the user reports a
 
 ## First run: System identification
 
-On first use, ask the user what system they're running. This determines which diagnostic commands and log locations to use throughout the session.
+On first use, ask the user what system they're running. This determines which diagnostic commands, log locations, and problem-category queries to use throughout the session.
 
 ```
 What system are you troubleshooting?
@@ -19,7 +19,7 @@ What system are you troubleshooting?
 4. Windows
 ```
 
-Once the user answers, load the corresponding OS profile from the "OS-specific profiles" section below. All subsequent diagnostics use that profile's commands and log paths.
+Once the user answers, load the corresponding OS profile from the "OS-specific profiles" section below. **All** subsequent diagnostics use that profile's commands, log paths, and problem-category queries.
 
 If the user doesn't specify, default to Linux (systemd) and note the assumption.
 
@@ -87,7 +87,7 @@ This is the hardest part. You need to show that the stall **directly caused** th
 
 **For peripheral/input issues:**
 - USB devices are kernel-polled — they survive most userspace stalls.
-- Bluetooth devices depend on a userspace daemon (bluetoothd, bluetoothd on macOS, Bluetooth Support Service on Windows) — if the daemon stalls, the device dies.
+- Bluetooth devices depend on a userspace daemon (bluetoothd on Linux, bluetoothd on macOS, Bluetooth Support Service on Windows) — if the daemon stalls, the device dies.
 - This explains "my USB keyboard works but my Bluetooth mouse doesn't" — the keyboard doesn't need the stalled daemon.
 
 **For network issues:**
@@ -98,8 +98,10 @@ This is the hardest part. You need to show that the stall **directly caused** th
 - GPU resets, compositor crashes, and driver timeouts are often visible in system logs.
 - Check for TDR (Timeout Detection and Recovery) on Windows, GPU resets on Linux, window server crashes on macOS.
 
-**The D-Bus / IPC test:**
-On Linux, if a D-Bus service can't respond to other services during the stall, it's stalled. KDE Connect, NetworkManager, and other D-Bus clients will log timeout errors. These timeouts are **direct evidence** that the target service was unresponsive.
+**The IPC test:**
+- Linux (systemd): If a D-Bus service can't respond to other services during the stall, it's stalled. KDE Connect, NetworkManager, and other D-Bus clients will log timeout errors. These timeouts are **direct evidence** that the target service was unresponsive.
+- macOS: If a XPC service can't respond, `log show` will show timeout errors from launchd. WindowServer hangs are visible in `log show --predicate 'process == "WindowServer"'`.
+- Windows: If a COM/RPC service can't respond, Event Viewer will show DCOM timeout errors (Event ID 10010, 10016).
 
 ### 4. Prove the stall was caused by the suspected root cause
 
@@ -197,114 +199,433 @@ Present the report and ask: "Should I apply this fix?"
 
 ## OS-specific profiles
 
-These profiles define the diagnostic commands and log locations for each OS. Load the appropriate one after system identification.
+These profiles define the diagnostic commands, log locations, and **problem-category queries** for each OS. Load the appropriate one after system identification.
+
+Each profile includes:
+- **Log & service commands** — where to look
+- **Problem-category queries** — what to run when a specific type of problem is reported
+- **Common stall indicators** — what patterns in the logs mean the system was stalled
+- **Device inspection** — how to check hardware and peripherals
 
 ### Linux (systemd)
 
-**Logs:**
-- System journal: `journalctl -b` (current boot), `journalctl -b -N` (Nth previous boot)
-- Kernel ring buffer: `dmesg` or `journalctl -k`
-- Package log: `/var/log/pacman.log` (Arch), `/var/log/dpkg.log` (Debian), `/var/log/yum.log` (Fedora)
+#### Logs & services
+
+**System logs:**
+- `journalctl -b` — current boot
+- `journalctl -b -N` — Nth previous boot
+- `journalctl -k` — kernel messages (same as `dmesg`)
+- `journalctl -u <service>` — service-specific logs
+- `journalctl --since "2026-05-13 10:00" --until "2026-05-13 11:00"` — time range
+
+**Package logs:**
+- `/var/log/pacman.log` (Arch/CachyOS)
+- `/var/log/dpkg.log` (Debian/Ubuntu)
+- `/var/log/yum.log` or `/var/log/dnf.log` (Fedora)
 
 **Service management:**
 - `systemctl status <service>` — check service state
-- `systemctl list-timers` — check scheduled jobs
-- `journalctl -u <service>` — check service logs
+- `systemctl list-timers` — scheduled jobs
+- `systemctl list-units --failed` — failed units
+- `systemctl list-units --type=service --state=running` — running services
 
-**Filesystem:**
-- btrfs: `btrfs device stats`, `btrfs scrub status`, `btrfs qgroup show`
-- ext4: `dumpe2fs`, `tune2fs -l`
-- SMART: `smartctl -a /dev/sdX`
+#### Problem-category queries
+
+**Freeze/stall:**
+```
+journalctl -b --no-pager | grep -iE "watchdog|timeout|stall|hung_task|blocked for"
+journalctl -b --no-pager -k | grep -iE "btrfs|ext4|I/O error|NMI|hardlock"
+systemctl list-units --failed
+```
+
+**Bluetooth disconnect:**
+```
+journalctl -b --no-pager | grep -iE "bluetooth|bluetoothd|hci0|supervision|timeout|disconnect"
+bluetoothctl info <addr>
+bluetoothctl show
+busctl tree org.bluez
+cat /etc/bluetooth/main.conf
+```
+
+**Audio issues:**
+```
+wpctl status          # PipeWire
+pw-cli info           # PipeWire details
+pactl list            # PulseAudio compat
+journalctl -b --no-pager | grep -iE "pipewire|wireplumber|pulseaudio|alsa"
+```
+
+**Boot issues:**
+```
+journalctl -b --no-pager | head -50        # early boot sequence
+systemd-analyze blame                       # boot time per service
+systemd-analyze critical-chain              # critical path
+systemctl list-units --state=failed
+```
+
+**GPU/display issues:**
+```
+journalctl -b --no-pager -k | grep -iE "nvidia|amdgpu|drm|gpu|reset|EE"
+nvidia-smi              # NVIDIA
+glxinfo | head -20      # OpenGL info
+```
+
+**Filesystem issues:**
+```
+btrfs device stats /                    # btrfs errors
+btrfs scrub status /                    # btrfs scrub
+btrfs qgroup show /                     # btrfs quotas (if enabled)
+smartctl -a /dev/sdX                     # SMART data
+findmnt -t btrfs                         # btrfs mounts
+```
+
+#### Common stall indicators
+
+- `systemd-journald.service: Watchdog timeout` — system completely stalled
+- Journal file "corrupted or uncleanly shut down" — unclean shutdown from stall
+- `hung_task_timeout` — kernel task blocked for 120+ seconds
+- `INFO: task <name> blocked for more than N seconds` — I/O stall
+- `btrfs: qgroup scan completed` — qgroup rescan was running (check timing)
+- `NMI: IOCK` — hardware I/O error
+- `D-Bus timeout` / `Did not receive a reply` — IPC service stalled
+
+#### Device inspection
 
 **Bluetooth:**
-- `bluetoothctl info <addr>` — device details
-- `bluetoothctl show` — adapter details
-- `/etc/bluetooth/main.conf` — BlueZ config
-- D-Bus: `busctl tree org.bluez` — introspect BlueZ objects
+```
+bluetoothctl info <addr>     # device details, paired, trusted, connected
+bluetoothctl show            # adapter details, power, discoverable
+lsusb | grep -i bluetooth    # USB BT adapter
+rfkill list                  # RF kill status
+cat /sys/class/bluetooth/hci0/address  # adapter address
+```
 
-**Audio:**
-- PipeWire: `pw-cli info`, `wpctl status`
-- PulseAudio: `pacmd info`, `pactl list`
+**USB:**
+```
+lsusb                        # list USB devices
+lsusb -t                     # USB tree (show topology)
+usb-devices                  # detailed USB device info
+cat /sys/kernel/debug/usb/devices  # kernel USB debug
+```
+
+**Storage:**
+```
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT   # block devices
+findmnt                                 # mounts
+smartctl -a /dev/sdX                    # SMART
+hdparm -I /dev/sdX                      # drive info
+```
+
+**Network:**
+```
+ip link show                  # interfaces
+ip addr show                  # addresses
+nmcli device status           # NetworkManager
+iw dev                        # wireless
+```
+
+---
 
 ### Linux (non-systemd)
 
-**Logs:**
-- `/var/log/messages` or `/var/log/syslog` — system log
+#### Logs & services
+
+**System logs:**
+- `/var/log/messages` or `/var/log/syslog` — main system log
 - `/var/log/daemon.log` — daemon log (some distros)
 - `dmesg` — kernel ring buffer
-- `rc-status` — service status (OpenRC)
-- `sv status <service>` — runit service status
+- `/var/log/rc.log` — OpenRC log (if enabled)
 
 **Service management:**
 - OpenRC: `rc-status`, `rc-update show`, `/etc/init.d/<service> status`
 - runit: `sv status <service>`, `/etc/sv/<service>/run`
 - s6: `s6-rc list`, `s6-rc status <service>`
 
-**Bluetooth/Audio:** Same as systemd Linux (BlueZ, PipeWire/PulseAudio are distro-agnostic).
+#### Problem-category queries
+
+**Freeze/stall:**
+```
+dmesg | grep -iE "hung_task|blocked for|I/O error|NMI|hardlock"
+grep -iE "watchdog|timeout|stall" /var/log/messages
+cat /proc/sys/kernel/hung_task_timeout_secs
+```
+
+**Bluetooth disconnect:**
+```
+grep -iE "bluetooth|bluetoothd|hci0|supervision|timeout" /var/log/messages
+bluetoothctl info <addr>
+bluetoothctl show
+cat /etc/bluetooth/main.conf
+```
+
+**Audio issues:**
+```
+wpctl status
+pactl list
+grep -iE "pipewire|wireplumber|pulseaudio|alsa" /var/log/messages
+```
+
+**Boot issues:**
+```
+dmesg | head -50
+rc-status                          # OpenRC services
+cat /var/log/rc.log                # OpenRC boot log
+```
+
+**Filesystem issues:**
+```
+btrfs device stats /
+btrfs scrub status /
+smartctl -a /dev/sdX
+```
+
+#### Common stall indicators
+
+- `hung_task_timeout` — kernel task blocked for 120+ seconds
+- `INFO: task <name> blocked for more than N seconds` — I/O stall
+- `btrfs: qgroup scan completed` — qgroup rescan was running
+- Log gaps in `/var/log/messages` — system too stalled to write
+- `NMI: IOCK` — hardware I/O error
+
+#### Device inspection
+
+Same as systemd Linux — `bluetoothctl`, `lsusb`, `lsblk`, `smartctl`, `ip` are distro-agnostic.
+
+---
 
 ### macOS
 
-**Logs:**
-- `log show` — unified log system (replaces console.log, system.log)
+#### Logs & services
+
+**System logs:**
+- `log show` — unified log system
 - `log show --predicate 'process == "bluetoothd"'` — filter by process
+- `log show --predicate 'subsystem == "com.apple.bluetooth"'` — filter by subsystem
 - `log show --start "2026-05-13 10:00:00" --end "2026-05-13 11:00:00"` — time range
+- `log show --style compact` — compact format
 - Console.app — GUI log viewer
 
 **Service management:**
 - `launchctl list` — loaded launch daemons/agents
 - `launchctl print gui/$(id -u)` — user domain services
+- `launchctl print system/` — system domain services
 - `/Library/LaunchDaemons/`, `/Library/LaunchAgents/` — system-level
 - `~/Library/LaunchAgents/` — user-level
 
-**Filesystem:**
-- APFS: `diskutil apfs list`, `diskutil verifyVolume /`
-- HFS+: `diskutil verifyVolume /`, `fsck -f`
-- SMART: `smartctl -a /dev/disk0` (needs smartmontools)
+#### Problem-category queries
+
+**Freeze/stall:**
+```
+log show --predicate 'eventMessage contains "timeout" or eventMessage contains "stall" or eventMessage contains "hang"' --style compact
+log show --predicate 'process == "WindowServer"' --last 1h --style compact
+log show --predicate 'subsystem == "com.apple.kernel"' --last 1h --style compact
+sysctl vm.loadavg                    # system load
+vm_stat                              # VM statistics
+```
+
+**Bluetooth disconnect:**
+```
+log show --predicate 'process == "bluetoothd"' --last 1h --style compact
+log show --predicate 'subsystem == "com.apple.bluetooth"' --last 1h --style compact
+system_profiler SPBluetoothDataType
+defaults read /Library/Preferences/com.apple.Bluetooth
+```
+
+**Audio issues:**
+```
+log show --predicate 'process == "coreaudiod"' --last 1h --style compact
+system_profiler SPAudioDataType
+sudo killall coreaudiod              # restart audio daemon
+```
+
+**Boot issues:**
+```
+log show --start $(date -v-1H "+%Y-%m-%d %H:%M:%S") --style compact | head -50
+system_profiler SPSoftwareDataType   # OS version, boot time
+uptime                               # boot time
+```
+
+**Filesystem issues:**
+```
+diskutil verifyVolume /
+diskutil apfs list
+log show --predicate 'subsystem == "com.apple.apfs"' --last 1h --style compact
+smartctl -a /dev/disk0               # needs smartmontools
+```
+
+**GPU/display issues:**
+```
+log show --predicate 'process == "WindowServer"' --last 1h --style compact
+system_profiler SPDisplaysDataType
+```
+
+#### Common stall indicators
+
+- `log show` gaps — periods with no entries = system stalled
+- WindowServer hangs — `WindowServer` process not responding
+- `bluetoothd` timeout entries — Bluetooth daemon stalled
+- `kernel` panic entries — kernel panic
+- `disk I/O error` — storage issues
+- `spinlock` or `deadlock` entries — kernel lock contention
+
+#### Device inspection
 
 **Bluetooth:**
-- `system_profiler SPBluetoothDataType` — adapter and device info
-- `defaults read /Library/Preferences/com.apple.Bluetooth` — Bluetooth prefs
-- `log show --predicate 'process == "bluetoothd"'` — Bluetooth daemon logs
+```
+system_profiler SPBluetoothDataType
+defaults read /Library/Preferences/com.apple.Bluetooth
+log show --predicate 'process == "bluetoothd"' --last 5m --style compact
+```
 
-**Audio:**
-- `coreaudiod` — audio daemon (restart: `sudo killall coreaudiod`)
-- Audio MIDI Setup — device configuration
-- `system_profiler SPAudioDataType` — audio devices
+**USB/Thunderbolt:**
+```
+system_profiler SPUSBDataType
+system_profiler SPThunderboltDataType
+ioreg -p IOUSB -l -w 0              # USB device tree
+```
+
+**Storage:**
+```
+diskutil list
+diskutil apfs list
+system_profiler SPNVMeDataType
+system_profiler SPSerialATADataType
+smartctl -a /dev/disk0               # needs smartmontools
+```
+
+**Network:**
+```
+networksetup -listallhardwareports
+ifconfig
+networksetup -getinfo Wi-Fi
+system_profiler SPNetworkDataType
+```
+
+---
 
 ### Windows
 
-**Logs:**
+#### Logs & services
+
+**System logs:**
 - Event Viewer: `eventvwr.msc` or `Get-WinEvent` / `wevtutil`
-- System log: `Get-WinEvent -LogName System`
-- Application log: `Get-WinEvent -LogName Application`
+- System log: `Get-WinEvent -LogName System -MaxEvents 100`
+- Application log: `Get-WinEvent -LogName Application -MaxEvents 100`
 - Reliability Monitor: `perfmon /rel` — crash/failure history
+- `wevtutil qe System /c:100 /f:text` — command-line event query
 
 **Service management:**
 - `Get-Service` — list services
+- `Get-Service | Where-Object {$_.Status -eq "Running"}` — running services
 - `sc query <service>` — service status
 - Task Scheduler: `schtasks /query`, `taskschd.msc`
 
-**Filesystem:**
-- NTFS: `chkdsk C: /f`, `fsutil fsinfo ntfsinfo C:`
-- ReFS: `fsutil refs info C:`
-- SMART: `wmic diskdrive status`, `smartctl -a /dev/sdX` (needs smartmontools)
+#### Problem-category queries
+
+**Freeze/stall:**
+```powershell
+Get-WinEvent -LogName System -MaxEvents 200 | Where-Object {$_.LevelDisplayName -eq "Error" -or $_.LevelDisplayName -eq "Warning"}
+Get-WinEvent -LogName System | Where-Object {$_.Message -match "timeout|hang|stall|frozen|unresponsive"}
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Microsoft-Windows-Kernel"}
+# Check for WHEA errors (hardware)
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "WHEA"}
+# Check for DCOM timeouts (IPC stalls)
+Get-WinEvent -LogName System | Where-Object {$_.Id -eq 10010 -or $_.Id -eq 10016}
+```
+
+**Bluetooth disconnect:**
+```powershell
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Bluetooth"}
+Get-PnpDevice -Class Bluetooth
+Get-Service bthserv | Format-List *
+Get-NetAdapter | Where-Object {$_.InterfaceType -eq "Bluetooth"}
+# Device Manager details
+Get-PnpDevice -Class Bluetooth | Get-PnpDeviceProperty -KeyName DEVPKEY_Device_DriverVersion
+```
+
+**Audio issues:**
+```powershell
+Get-Service Audiosrv | Format-List *
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Audio"}
+Get-PnpDevice -Class AudioEndpoint
+Get-PnpDevice -Class MEDIA
+```
+
+**Boot issues:**
+```powershell
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Boot"} | Select-Object -First 20
+# Boot performance
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Diagnostics-Performance"}
+# Last boot time
+(Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+```
+
+**Filesystem issues:**
+```powershell
+# Check disk
+chkdsk C: /f
+# NTFS info
+fsutil fsinfo ntfsinfo C:
+# SMART
+wmic diskdrive get status,model,size
+# Volume errors
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "disk|Ntfs"}
+```
+
+**GPU/display issues:**
+```powershell
+Get-WinEvent -LogName System | Where-Object {$_.ProviderName -match "Display"}
+# TDR events (Timeout Detection and Recovery)
+Get-WinEvent -LogName System | Where-Object {$_.Id -eq 4101}
+# GPU driver info
+Get-WmiObject Win32_VideoController | Format-List *
+```
+
+#### Common stall indicators
+
+- Event ID 10010 / 10016 — DCOM timeout (IPC service stalled)
+- Event ID 4101 — GPU TDR (display driver timeout)
+- WHEA errors — hardware errors (memory, PCIe, disk)
+- `EventLog` service gaps — system too stalled to write events
+- `Disk` errors — I/O failures
+- `Application Error` / `Application Crash` — app failures
+- `Windows Error Reporting` — crash reports
+
+#### Device inspection
 
 **Bluetooth:**
-- `Get-NetAdapter | Where-Object {$_.InterfaceType -eq "Bluetooth"}` — adapter
-- `Get-PnpDevice -Class Bluetooth` — Bluetooth devices
-- Bluetooth Support Service: `Get-Service bthserv`
-- Device Manager: `devmgmt.msc`
+```powershell
+Get-PnpDevice -Class Bluetooth | Format-Table Status, Class, FriendlyName, InstanceId
+Get-Service bthserv | Format-List *
+Get-NetAdapter | Where-Object {$_.InterfaceType -eq "Bluetooth"}
+```
 
-**Audio:**
-- `Get-AudioDevice` (needs AudioDeviceCmdlets module)
-- Audio endpoint service: `Get-Service Audiosrv`
-- Sound control panel: `mmsys.cpl`
+**USB:**
+```powershell
+Get-PnpDevice -Class USB | Format-Table Status, Class, FriendlyName
+usbview.exe                          # USB tree (from Windows SDK)
+```
+
+**Storage:**
+```powershell
+Get-Disk | Format-Table Number, FriendlyName, Size, HealthStatus
+Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, HealthStatus
+wmic diskdrive get model,status,size
+smartctl -a /dev/sdX                 # needs smartmontools
+```
+
+**Network:**
+```powershell
+Get-NetAdapter | Format-Table Name, InterfaceDescription, Status, LinkSpeed
+Get-NetIPAddress | Format-Table InterfaceAlias, IPAddress
+ipconfig /all
+```
 
 ## Safe diagnostics
 
 Read-only diagnostics can run without user approval:
 
-- read logs (journalctl, log show, Event Viewer, dmesg)
+- read logs (journalctl, log show, Get-WinEvent, dmesg)
 - inspect service state (systemctl, launchctl, Get-Service, sv status)
 - inspect config files
 - inspect package/driver versions
