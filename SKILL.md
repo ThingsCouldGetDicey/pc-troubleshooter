@@ -7,6 +7,22 @@ description: "Root-cause diagnostic methodology for any PC — system-agnostic c
 
 A root-cause diagnostic skill for **any** PC system. Use when the user reports any PC problem: freezes, disconnects, crashes, performance issues, boot problems, service failures, hardware quirks, or any "it worked before and now it doesn't" situation.
 
+## What this skill solves
+
+LLMs troubleshooting PC problems tend to make the same mistakes:
+
+1. **Stopping at the first plausible explanation.** "Your mouse disconnected? Must be a Bluetooth issue." — without checking whether the Bluetooth daemon was stalled by something else entirely. The skill forces chain reasoning: keep asking "why?" until nothing deeper explains it.
+
+2. **Suggesting patches that don't address the actual issue.** "Apply this BlueZ patch" — when the patch fixes an error message for stock configs, but the user has custom values that are already working. The skill requires verifying the fix actually changes the running state, not just the config file.
+
+3. **Treating correlation as causation.** "The mouse disconnected and btrfs was running" — without proving the btrfs operation was running DURING the disconnect, or that the disconnect was caused by the stall rather than happening at the same time. The skill requires a smoking gun: evidence that directly proves causation.
+
+4. **Applying workarounds and calling them fixes.** "Disable quotas" — when the real fix is to make quotas work correctly so the system is protected against ALL I/O stall sources, not just one. The skill distinguishes containment from structural fixes.
+
+5. **Not checking if the fix survives reality.** A patched binary gets overwritten by the next package update. A config change doesn't take effect until a service restart. A per-device setting gets overridden by the peripheral's preferences on reconnection. The skill requires verifying the fix is actually active, not just written to a file.
+
+6. **Narrow focus on the symptom component.** "Mouse disconnected → check Bluetooth" — when the real cause is a filesystem operation stalling the entire I/O subsystem. The skill forces tangential investigation: check what ELSE was happening when the symptom occurred.
+
 ## First run: System identification
 
 On first use, ask the user what system they're running. This determines which diagnostic commands, log locations, and problem-category queries to use throughout the session.
@@ -146,16 +162,48 @@ Smoking gun: KDE Connect D-Bus timeout at 23:06:08 (bluetoothd not responding)
   + journal gap from 23:03 to 23:06 (system too stalled to write)
 ```
 
+## Exhaustive elimination
+
+Before proposing a fix, exhaust all alternative explanations. A fix that addresses one possible cause but leaves others unexplored is not a fix — it's a gamble.
+
+**The elimination checklist:**
+
+For every proposed root cause, ask:
+
+1. **Does this explain ALL observed symptoms?** If the mouse disconnects AND the keyboard works, the fix must explain why USB survived but Bluetooth didn't. If it can't, the fix is incomplete.
+
+2. **Does this explain the timing?** If the problem happens at 23:06, the proposed cause must have been active at 23:06. Not "around that time" — actually at that time. Use log timestamps to prove it.
+
+3. **Are there alternative explanations that haven't been ruled out?** List them explicitly. For each one, state what evidence would confirm or rule it out. Then go get that evidence.
+
+4. **If I apply this fix, will the problem definitely not recur?** If the answer is "probably not" or "it should help," the fix is not structural. A structural fix eliminates the entire class of problem, not just one instance.
+
+5. **Am I fixing the actual mechanism, or just changing a setting that happens to help?** Disabling quotas prevents the qgroup rescan trigger, but doesn't prevent OTHER I/O stalls from causing the same symptom. The structural fix is to make the system resilient against I/O stalls (e.g., ensuring userspace daemons don't die when the I/O subsystem stalls).
+
+**Example: the quota disable mistake**
+
+```
+Problem: btrfs qgroup rescan stalls the system → bluetoothd dies → mouse disconnects
+Wrong fix: "Disable quotas" — prevents THIS trigger but not OTHER I/O stall sources
+  (btrfs balance, scrub, heavy backup, updatedb, etc.)
+Right fix: "Re-enable quotas AND fix the snapper-cleanup that leaves the
+  inconsistency flag AND fix the limine-snapper-sync regression that
+  prevented cleanup from completing AND ensure I/O-heavy operations
+  run at idle priority AND verify bluetoothd recovers from I/O stalls"
+```
+
+A fix that disables a feature to avoid a bug is a workaround, not a fix. The feature (quotas) exists for a reason. The fix should make the feature work correctly, not remove it.
+
 ## No workarounds
 
 **Workarounds are never the fix.** A workaround masks the symptom without addressing the root cause. Examples of things that are NOT fixes:
 
-- Disabling hardware acceleration to avoid a decode bug
-- Forcing software decode/render paths
-- Clearing state/cache to avoid a corruption bug
-- Avoiding a code path instead of fixing it
-- Adding retry logic on top of a broken protocol handler
+- Disabling a feature to avoid a bug (disabling quotas, disabling hardware acceleration)
+- Forcing a fallback path instead of fixing the primary path
+- Clearing state/cache to avoid a corruption bug instead of fixing the corruption
+- Adding retry logic on top of a broken protocol handler instead of fixing the protocol
 - Disabling a service that's interfering instead of fixing the interference
+- Patching a binary without verifying the patch actually changes the running behavior
 
 Workarounds are acceptable ONLY as temporary containment while the root cause is being fixed, and must be labelled:
 
@@ -185,8 +233,21 @@ Walk through the causal chain from root cause to symptom. Each step should expla
 - What does the official documentation say about this?
 - Is this a config fix, a package update, or an upstream bug that needs reporting?
 - What's the rollback if the fix doesn't work?
+- **Does this fix address the mechanism, or just avoid the trigger?** If the fix removes a feature or disables a code path, it's containment, not a fix.
 
-### 5. Documentation consultation status
+### 5. Exhaustive elimination status
+List every alternative explanation that was considered and what evidence ruled it out (or why it's still open):
+
+```
+Ruled out:
+- [alternative 1] — [evidence that disproves it]
+- [alternative 2] — [evidence that disproves it]
+
+Still open:
+- [alternative 3] — [what evidence would resolve it]
+```
+
+### 6. Documentation consultation status
 **Every relevant documentation source must be consulted before the report is delivered.**
 
 ```
@@ -194,7 +255,7 @@ Consulted:
 - [source] — [what it confirmed / what was found]
 ```
 
-### 6. Prevent recurrence
+### 7. Prevent recurrence
 
 Before closing the branch, verify the fix is structural — not patchwork that will regress on the next update. Check:
 
@@ -208,31 +269,41 @@ Before closing the branch, verify the fix is structural — not patchwork that w
 - Check if the service that applies the change starts at boot.
 - Check if the change depends on a volatile state (e.g., a device address that changes after deep sleep).
 
+**Will the fix survive a reconnection?**
+- For peripherals: check if the device's preferred connection parameters (PPCP) override your config on reconnection.
+- For network devices: check if DHCP or 802.1X re-authentication resets your config.
+- For USB devices: check if the device re-enumerates with different settings after suspend/resume.
+
 **Could the same class of problem recur from a different trigger?**
-- If the root cause was "I/O stall killed a userspace daemon", disabling one I/O source (quotas, cleanup) doesn't prevent OTHER I/O sources from causing the same stall. Check for: scheduled balance, scrub, trim, backup, indexing, or update jobs that could cause heavy I/O.
+- If the root cause was "I/O stall killed a userspace daemon", disabling one I/O source doesn't prevent OTHER I/O sources from causing the same stall. Check for: scheduled balance, scrub, trim, backup, indexing, or update jobs that could cause heavy I/O.
 - If the root cause was "aggressive timeout on a peripheral", fixing one timeout doesn't prevent other peripherals from having the same issue. Check all connected devices.
+- If the root cause was "a feature was misconfigured", disabling the feature is not a fix. Fix the misconfiguration so the feature works correctly.
 
-**Regression check commands:**
+**Verify the fix is actually active — not just written to a file:**
 
-| OS | What to run after applying the fix |
-|----|-----------------------------------|
-| Linux (systemd) | Verify the fix is in the actual running config (not just the file): `cat` the config, check `sysfs`/`debugfs`, check `bluetoothctl info`, check `journalctl -b` for the error message returning. Check if the patched binary matches what's on disk: `md5sum` or `pacman -Qk`. Check `pacman -Q` for version changes. |
+| OS | What to verify |
+|----|---------------|
+| Linux (systemd) | Check `sysfs`/`debugfs` for the actual running value, not just the config file. Check `bluetoothctl info` for per-device params, not just `main.conf`. Check `journalctl -b` for the error message returning after a service restart. Check `pacman -Q` for version changes that could overwrite patches. |
 | Linux (non-systemd) | Same verification approach using `/var/log/messages`, `dmesg`, service status. |
 | macOS | `log show` for the error message returning. `launchctl print` for service config. `system_profiler` for device state. |
 | Windows | `Get-WinEvent` for the error returning. `Get-Service` for service state. `Get-PnpDevice` for device state. |
 
-### 7. Ask to continue
+### 8. Ask to continue
 Present the report and ask: "Should I apply this fix?"
 
 ## Known fixes registry
 
 These are fixes for common upstream bugs that affect multiple users. They're not workarounds — they're actual code fixes that haven't been released in a package yet, or package-level patches that need re-application after updates.
 
+**Important**: Before suggesting any fix from this registry, verify it actually applies to the user's situation. A fix that addresses an error message but doesn't change the running behavior is not a fix — it's cosmetic.
+
 ### BlueZ 5.86: "Failed to set default system config for hci0"
 
-**Bug**: BlueZ 5.86 cannot set the adapter's default connection parameters from `main.conf`. This means `LE.ConnectionSupervisionTimeout`, `LE.ConnectionLatency`, and `LE.MaxConnectionInterval` in `/etc/bluetooth/main.conf` are **silently ignored**. The peripheral's own preferred connection parameters (PPCP) are used instead, which may be too aggressive for reliable operation.
+**Bug**: BlueZ 5.86 logs "Failed to set default system config for hci0" on startup when using a stock (empty) configuration.
 
 **Root cause**: Commit `5e5b46c5c0cc` ("adapter: Do not send empty default system parameter list") changed the behavior so that when no config changes are needed, BlueZ skips the MGMT command. But when the config list is empty (stock config), the code jumps to `done:` which leaks the list and logs an error, instead of returning cleanly.
+
+**Scope**: This bug ONLY affects systems with a stock (empty) `main.conf`. If you have custom values in `main.conf` (e.g., `LE.ConnectionSupervisionTimeout=2000`), the MGMT command IS sent and the adapter defaults ARE applied. The error message does NOT appear with custom values. **Do not suggest this patch for users who already have custom main.conf values — it won't change their running behavior.**
 
 **Fix**: Commit `46937fd` ("adapter: Fix 'Failed to set default system config' startup warning") — frees the list and returns instead of jumping to `done:`.
 
@@ -282,7 +353,7 @@ Exec = /usr/local/bin/bluez-repatch.sh
 **Verification**: After applying, check:
 - `journalctl -u bluetooth | grep "Failed to set default system config"` — should NOT appear
 - `cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout` — should match main.conf value
-- `bluetoothctl info <addr>` — per-device params should match main.conf, not the peripheral's PPCP
+- **Critical**: Verify the actual running connection params, not just the adapter defaults. Check per-device params in `/var/lib/bluetooth/<adapter>/<device>/info` — these may differ from the adapter defaults if the peripheral's PPCP overrides them.
 
 **Affected versions**: BlueZ 5.86 (confirmed). Fixed in upstream git (commit 46937fd). Not yet in a release package as of 2026-05-13.
 
@@ -334,6 +405,12 @@ bluetoothctl info <addr>
 bluetoothctl show
 busctl tree org.bluez
 cat /etc/bluetooth/main.conf
+# Verify ACTUAL running params, not just config file:
+cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout
+cat /sys/kernel/debug/bluetooth/hci0/conn_latency
+cat /sys/kernel/debug/bluetooth/hci0/conn_max_interval
+# Check per-device stored params (may differ from adapter defaults):
+sudo cat /var/lib/bluetooth/<adapter>/<device>/info | grep -A4 ConnectionParameters
 ```
 
 **Audio issues:**
@@ -364,6 +441,7 @@ glxinfo | head -20      # OpenGL info
 btrfs device stats /                    # btrfs errors
 btrfs scrub status /                    # btrfs scrub
 btrfs qgroup show /                     # btrfs quotas (if enabled)
+btrfs quota status /                    # quota enabled/disabled
 smartctl -a /dev/sdX                     # SMART data
 findmnt -t btrfs                         # btrfs mounts
 ```
@@ -387,6 +465,10 @@ bluetoothctl show            # adapter details, power, discoverable
 lsusb | grep -i bluetooth    # USB BT adapter
 rfkill list                  # RF kill status
 cat /sys/class/bluetooth/hci0/address  # adapter address
+# Verify running params vs config file vs per-device stored params:
+cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout
+cat /sys/kernel/debug/bluetooth/hci0/conn_latency
+sudo cat /var/lib/bluetooth/<adapter>/<device>/info | grep -A4 ConnectionParameters
 ```
 
 **USB:**
@@ -445,6 +527,8 @@ grep -iE "bluetooth|bluetoothd|hci0|supervision|timeout" /var/log/messages
 bluetoothctl info <addr>
 bluetoothctl show
 cat /etc/bluetooth/main.conf
+# Verify running params:
+cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout
 ```
 
 **Audio issues:**
@@ -465,6 +549,7 @@ cat /var/log/rc.log                # OpenRC boot log
 ```
 btrfs device stats /
 btrfs scrub status /
+btrfs quota status /
 smartctl -a /dev/sdX
 ```
 
