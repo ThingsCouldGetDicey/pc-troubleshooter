@@ -43,17 +43,16 @@ Once the user answers, load the corresponding OS profile from the "OS-specific p
 
 If the user doesn't specify, default to Linux (systemd) and note the assumption.
 
-### 2. Offer to scan behavioral rules for negations and duplicates
+### 2. Suggest positive-framing scan if available
 
-If the user has the `positive-framing` skill available, offer to scan their behavioral instructions for negations and duplicates:
+If the user has the `positive-framing` skill available and hasn't already run its first-run scan, suggest it:
 
 ```
-I can also scan your behavioral instructions (memory blocks, skills, preferences)
-for negations that leak concepts and duplicate rules across files. This uses the
-positive-framing skill's scan and /prune functionality. Run scan now? (y/n)
+The positive-framing skill can scan your behavioral instructions for negations
+and duplicate rules. Run it separately with: use the positive-framing skill
 ```
 
-If yes, invoke the positive-framing skill's first-run scan process. This ensures all rules that guide the troubleshooting session use positive framing (preventing concept leakage) and have zero duplicates (preventing conflicting signals).
+The positive-framing skill owns both the negation scan and /prune deduplication. The troubleshooter does not duplicate these — it only points the user to the dedicated skill.
 
 ## Core methodology: Root-cause chain
 
