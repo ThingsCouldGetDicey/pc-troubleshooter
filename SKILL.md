@@ -1,11 +1,27 @@
 ---
 name: pc-troubleshooter
-description: "Root-cause diagnostic methodology for Linux desktop troubleshooting — CachyOS, Arch, KDE Plasma, systemd, boot, mounts, btrfs, Bluetooth, PipeWire, NVIDIA, input devices, and general PC issues."
+description: "Root-cause diagnostic methodology for any PC — system-agnostic chain reasoning, smoking gun evidence, and OS-specific diagnostic commands. Use for freezes, disconnects, crashes, performance issues, boot problems, service failures, hardware quirks, or any 'it worked before and now it doesn't' situation."
 ---
 
 # PC Troubleshooter
 
-A root-cause diagnostic skill for Linux desktop systems. Use when the user reports any PC problem: freezes, disconnects, crashes, performance issues, boot problems, service failures, hardware quirks, or any "it worked before and now it doesn't" situation.
+A root-cause diagnostic skill for **any** PC system. Use when the user reports any PC problem: freezes, disconnects, crashes, performance issues, boot problems, service failures, hardware quirks, or any "it worked before and now it doesn't" situation.
+
+## First run: System identification
+
+On first use, ask the user what system they're running. This determines which diagnostic commands and log locations to use throughout the session.
+
+```
+What system are you troubleshooting?
+1. Linux (systemd) — Arch, CachyOS, Ubuntu, Fedora, etc.
+2. Linux (non-systemd) — Artix, Void, Gentoo (OpenRC), Alpine, etc.
+3. macOS
+4. Windows
+```
+
+Once the user answers, load the corresponding OS profile from the "OS-specific profiles" section below. All subsequent diagnostics use that profile's commands and log paths.
+
+If the user doesn't specify, default to Linux (systemd) and note the assumption.
 
 ## Core methodology: Root-cause chain
 
@@ -28,45 +44,88 @@ When a symptom appears, do NOT stop at the first explanation. Chase the causal c
 
 - **Never stop at a symptom and call it a cause.** "BlueZ returns 0x0E" is a symptom. "Why does BlueZ return 0x0E now when it didn't last week?" is the chain.
 - **Ask why something changed.** If it worked before and doesn't now, something changed. Find what changed. That's usually the root cause.
-- **Look tangentially.** The cause may not be in the obvious component. A Bluetooth mouse disconnecting might be caused by a btrfs qgroup rescan stalling the I/O subsystem — the mouse is just the canary.
-- **Distinguish "has always been this way" from "this is new behaviour".** If BlueZ has always treated 0x0E as permanent failure, then 0x0E isn't new — what's new is that the mouse is now hitting that code path. Why?
+- **Look tangentially.** The cause may not be in the obvious component. A Bluetooth mouse disconnecting might be caused by a filesystem rescan stalling the I/O subsystem — the mouse is just the canary.
+- **Distinguish "has always been this way" from "this is new behaviour".** If the system has always treated an error as fatal, then the error isn't new — what's new is that the device is now hitting that code path. Why?
 - **Keep going until the chain terminates.** The chain terminates when you reach:
   - A config change that explains the new behaviour
-  - A package update that introduced a regression
+  - A package/driver/OS update that introduced a regression
   - A hardware change or failure
   - A state change (corrupted pairing data, stale cache, etc.)
   - A confirmed upstream bug that matches the exact version and symptoms
 
 ## Finding the smoking gun
 
-The smoking gun is the log entry or evidence that directly proves causation, not just correlation. Finding it requires:
+The smoking gun is the log entry or evidence that directly proves **causation**, not just correlation. It's the difference between "X happened around the same time as Y" and "X caused Y."
 
 ### 1. Identify the exact freeze/stall window
-- Use journald watchdog timeouts to bracket the stall
-- Check for journal gaps (periods with zero entries = system too stalled to write)
-- Use monotonic timestamps to find the real boot time vs buffered entries
+
+Find the time boundaries of the problem. The system itself often tells you:
+
+| OS | How to find the stall window |
+|----|------------------------------|
+| Linux (systemd) | `journalctl` watchdog timeouts, journal gaps (zero entries = system too stalled to write), monotonic timestamps |
+| Linux (non-systemd) | `/var/log/messages` or `/var/log/syslog` gaps, `dmesg` timestamps |
+| macOS | `log show` gaps, `system_profiler` timestamps, Console.app |
+| Windows | Event Viewer system log gaps, WMI timestamps, Reliability Monitor |
+
+Key principle: **If the logging system couldn't write during the window, the system was stalled.** A gap in the logs IS evidence — it proves the stall was severe enough to block the logger.
 
 ### 2. Check what was running during the window
-- Search for system services, cron jobs, timers that fired during the stall
-- Check for I/O-heavy operations: btrfs qgroup scans, scrub, balance, snapper cleanup
-- Check for memory-heavy operations: plocate-updatedb, baloo, arch-update-tray
+
+| OS | What to check |
+|----|---------------|
+| Linux (systemd) | `systemctl list-timers`, `journalctl` for services that started, cron jobs, I/O-heavy operations (filesystem scans, updatedb, backup jobs) |
+| Linux (non-systemd) | cron/at jobs, `/var/log/messages`, running service status |
+| macOS | `launchctl list`, `log show --predicate`, Time Machine, Spotlight indexing, `tmutil` |
+| Windows | Task Scheduler, Event Viewer, Windows Update, Defender scans, `schtasks` |
+
+Key principle: **I/O-heavy and CPU-heavy operations that started before or during the stall window are suspects.** Filesystem scans, index rebuilds, backup jobs, and update checks are the most common culprits.
 
 ### 3. Prove the causal link between the stall and the symptom
-- **For Bluetooth issues**: Check if bluetoothd was responding to D-Bus during the stall. KDE Connect D-Bus timeouts are a strong signal — if KDE Connect can't reach bluetoothd, the BT mouse can't either.
-- **For input issues**: Check if the input device is USB (kernel-polled, survives stalls) or Bluetooth (userspace daemon, vulnerable to stalls). This explains "keyboard works but mouse doesn't."
-- **For display issues**: Check KWin/compositor logs, GPU reset events, DRM errors.
+
+This is the hardest part. You need to show that the stall **directly caused** the user's symptom, not just that they happened at the same time.
+
+**For peripheral/input issues:**
+- USB devices are kernel-polled — they survive most userspace stalls.
+- Bluetooth devices depend on a userspace daemon (bluetoothd, bluetoothd on macOS, Bluetooth Support Service on Windows) — if the daemon stalls, the device dies.
+- This explains "my USB keyboard works but my Bluetooth mouse doesn't" — the keyboard doesn't need the stalled daemon.
+
+**For network issues:**
+- Check if the network stack is kernel-level (survives stalls) or userspace (vulnerable).
+- VPN clients, DHCP clients, and DNS resolvers are often userspace.
+
+**For display issues:**
+- GPU resets, compositor crashes, and driver timeouts are often visible in system logs.
+- Check for TDR (Timeout Detection and Recovery) on Windows, GPU resets on Linux, window server crashes on macOS.
+
+**The D-Bus / IPC test:**
+On Linux, if a D-Bus service can't respond to other services during the stall, it's stalled. KDE Connect, NetworkManager, and other D-Bus clients will log timeout errors. These timeouts are **direct evidence** that the target service was unresponsive.
 
 ### 4. Prove the stall was caused by the suspected root cause
-- btrfs qgroup scan: the kernel logs "qgroup scan completed" but NOT the start. If the scan completed at time T and the stall started before T, the scan was running during the stall.
-- Package updates: check `pacman.log` for the change window.
-- Config changes: check backup files (`.bak`, `.pacnew`, `.pacsave`) for timestamps.
+
+You need to show that the operation you identified in step 2 was **running during** the stall window, not just before or after it.
+
+| OS | How to prove timing |
+|----|---------------------|
+| Linux (systemd) | Kernel logs completion but not start (e.g., btrfs "qgroup scan completed"). If completion is at time T and the stall started before T, the operation was running during the stall. |
+| Linux (non-systemd) | Same principle — check for completion messages and work backwards. |
+| macOS | `log show` for operation start/completion, `fs_usage` for I/O traces. |
+| Windows | Event Viewer operation start/stop events, ETW traces, Resource Monitor history. |
+
+Key principle: **Many operations log completion but not start.** If the completion time is AFTER the stall started, the operation was running during the stall. This is circumstantial but strong evidence.
 
 ### 5. Check for downstream damage
-- btrfs corruption errors appearing after a stall prove unclean shutdown
-- Journal file corruption ("corrupted or uncleanly shut down") proves the stall was severe
-- Device stats (btrfs, SMART) may show errors that appeared after the stall
 
-### Example: The btrfs qgroup → BT mouse chain
+A severe stall often causes secondary damage. Finding this damage corroborates the stall's severity:
+
+| OS | What to check |
+|----|---------------|
+| Linux (systemd) | Journal file corruption ("corrupted or uncleanly shut down"), btrfs device stats, SMART error counters, filesystem errors at next boot |
+| Linux (non-systemd) | `/var/log/messages` for filesystem errors, `dmesg` for hardware errors, SMART data |
+| macOS | `diskutil verifyVolume`, `log show` for I/O errors, `sysctl` for VM stats |
+| Windows | `chkdsk`, Event Viewer disk errors, `sfc /scannow`, SMART via `wmic` |
+
+### Worked example: The btrfs qgroup → BT mouse chain
 
 ```
 Symptom: BT mouse freezes during gameplay
@@ -110,7 +169,7 @@ When the root-cause chain terminates, produce a structured report:
 Explain the symptom in simple terms. What does the user experience? What's broken?
 
 ### 2. Why it's happening (the full chain)
-Walk through the causal chain from root cause to symptom. Each step should explain HOW the previous step causes the next. Use plain language — imagine explaining to someone who isn't a Linux kernel developer.
+Walk through the causal chain from root cause to symptom. Each step should explain HOW the previous step causes the next. Use plain language — imagine explaining to someone who isn't a systems developer.
 
 ### 3. What the impact is
 - What does this break?
@@ -136,19 +195,122 @@ Consulted:
 ### 6. Ask to continue
 Present the report and ask: "Should I apply this fix?"
 
+## OS-specific profiles
+
+These profiles define the diagnostic commands and log locations for each OS. Load the appropriate one after system identification.
+
+### Linux (systemd)
+
+**Logs:**
+- System journal: `journalctl -b` (current boot), `journalctl -b -N` (Nth previous boot)
+- Kernel ring buffer: `dmesg` or `journalctl -k`
+- Package log: `/var/log/pacman.log` (Arch), `/var/log/dpkg.log` (Debian), `/var/log/yum.log` (Fedora)
+
+**Service management:**
+- `systemctl status <service>` — check service state
+- `systemctl list-timers` — check scheduled jobs
+- `journalctl -u <service>` — check service logs
+
+**Filesystem:**
+- btrfs: `btrfs device stats`, `btrfs scrub status`, `btrfs qgroup show`
+- ext4: `dumpe2fs`, `tune2fs -l`
+- SMART: `smartctl -a /dev/sdX`
+
+**Bluetooth:**
+- `bluetoothctl info <addr>` — device details
+- `bluetoothctl show` — adapter details
+- `/etc/bluetooth/main.conf` — BlueZ config
+- D-Bus: `busctl tree org.bluez` — introspect BlueZ objects
+
+**Audio:**
+- PipeWire: `pw-cli info`, `wpctl status`
+- PulseAudio: `pacmd info`, `pactl list`
+
+### Linux (non-systemd)
+
+**Logs:**
+- `/var/log/messages` or `/var/log/syslog` — system log
+- `/var/log/daemon.log` — daemon log (some distros)
+- `dmesg` — kernel ring buffer
+- `rc-status` — service status (OpenRC)
+- `sv status <service>` — runit service status
+
+**Service management:**
+- OpenRC: `rc-status`, `rc-update show`, `/etc/init.d/<service> status`
+- runit: `sv status <service>`, `/etc/sv/<service>/run`
+- s6: `s6-rc list`, `s6-rc status <service>`
+
+**Bluetooth/Audio:** Same as systemd Linux (BlueZ, PipeWire/PulseAudio are distro-agnostic).
+
+### macOS
+
+**Logs:**
+- `log show` — unified log system (replaces console.log, system.log)
+- `log show --predicate 'process == "bluetoothd"'` — filter by process
+- `log show --start "2026-05-13 10:00:00" --end "2026-05-13 11:00:00"` — time range
+- Console.app — GUI log viewer
+
+**Service management:**
+- `launchctl list` — loaded launch daemons/agents
+- `launchctl print gui/$(id -u)` — user domain services
+- `/Library/LaunchDaemons/`, `/Library/LaunchAgents/` — system-level
+- `~/Library/LaunchAgents/` — user-level
+
+**Filesystem:**
+- APFS: `diskutil apfs list`, `diskutil verifyVolume /`
+- HFS+: `diskutil verifyVolume /`, `fsck -f`
+- SMART: `smartctl -a /dev/disk0` (needs smartmontools)
+
+**Bluetooth:**
+- `system_profiler SPBluetoothDataType` — adapter and device info
+- `defaults read /Library/Preferences/com.apple.Bluetooth` — Bluetooth prefs
+- `log show --predicate 'process == "bluetoothd"'` — Bluetooth daemon logs
+
+**Audio:**
+- `coreaudiod` — audio daemon (restart: `sudo killall coreaudiod`)
+- Audio MIDI Setup — device configuration
+- `system_profiler SPAudioDataType` — audio devices
+
+### Windows
+
+**Logs:**
+- Event Viewer: `eventvwr.msc` or `Get-WinEvent` / `wevtutil`
+- System log: `Get-WinEvent -LogName System`
+- Application log: `Get-WinEvent -LogName Application`
+- Reliability Monitor: `perfmon /rel` — crash/failure history
+
+**Service management:**
+- `Get-Service` — list services
+- `sc query <service>` — service status
+- Task Scheduler: `schtasks /query`, `taskschd.msc`
+
+**Filesystem:**
+- NTFS: `chkdsk C: /f`, `fsutil fsinfo ntfsinfo C:`
+- ReFS: `fsutil refs info C:`
+- SMART: `wmic diskdrive status`, `smartctl -a /dev/sdX` (needs smartmontools)
+
+**Bluetooth:**
+- `Get-NetAdapter | Where-Object {$_.InterfaceType -eq "Bluetooth"}` — adapter
+- `Get-PnpDevice -Class Bluetooth` — Bluetooth devices
+- Bluetooth Support Service: `Get-Service bthserv`
+- Device Manager: `devmgmt.msc`
+
+**Audio:**
+- `Get-AudioDevice` (needs AudioDeviceCmdlets module)
+- Audio endpoint service: `Get-Service Audiosrv`
+- Sound control panel: `mmsys.cpl`
+
 ## Safe diagnostics
 
 Read-only diagnostics can run without user approval:
 
-- read logs (journalctl, dmesg, pacman.log)
-- inspect service state (systemctl status, bluetoothctl info)
+- read logs (journalctl, log show, Event Viewer, dmesg)
+- inspect service state (systemctl, launchctl, Get-Service, sv status)
 - inspect config files
-- inspect package versions and ownership
-- inspect process trees, timers, device state
-- inspect btrfs filesystem state (device stats, qgroup status, scrub status)
-- inspect SMART data
-- check what changed recently (pacman log, journal time ranges)
-- compare package versions before/after a change window
+- inspect package/driver versions
+- inspect process trees, scheduled tasks, device state
+- inspect filesystem state (device stats, SMART, scrub status)
+- check what changed recently (package logs, journal time ranges, update history)
 
 State-changing actions require the fix report and user approval.
 
@@ -156,15 +318,12 @@ State-changing actions require the fix report and user approval.
 
 Before persistent fixes, consult the relevant documented layer:
 
-- Distribution docs/repo/package notes
-- Arch Wiki / package docs
-- Installed man pages / help
-- Desktop environment docs (KDE, GNOME, etc.)
-- systemd docs
-- PipeWire / WirePlumber docs
-- Upstream release notes / issues
-- BlueZ docs (for Bluetooth issues)
-- btrfs docs / wiki (for filesystem issues)
+- OS/distribution documentation
+- Package/driver documentation
+- Installed help/man pages
+- Desktop environment docs
+- Service daemon docs
+- Upstream release notes/issues
 
 Use local hacks only when documented methods fail, the reason is explained, and rollback exists.
 
@@ -174,7 +333,7 @@ When using GitHub/GitLab/upstream issues as evidence, check freshness:
 
 - opened within 30 days
 - updated/commented within 30 days
-- still open and applies to current package versions
+- still open and applies to current package/driver versions
 - explicitly unresolved
 - linked from current release notes or known-issues pages
 
