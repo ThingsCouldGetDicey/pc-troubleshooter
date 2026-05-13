@@ -23,9 +23,13 @@ LLMs troubleshooting PC problems tend to make the same mistakes. This skill corr
 
 6. **Narrow focus on the symptom component.** "Mouse disconnected → check Bluetooth" — when the real cause is a filesystem operation stalling the entire I/O subsystem. **Correct approach**: Check what ELSE was happening when the symptom occurred. Investigate tangentially.
 
-## First run: System identification
+## First run: System identification + rule scan
 
-On first use, ask the user what system they're running. This determines which diagnostic commands, log locations, and problem-category queries to use throughout the session.
+On first use, do two things:
+
+### 1. Ask what system they're running
+
+This determines which diagnostic commands, log locations, and problem-category queries to use throughout the session.
 
 ```
 What system are you troubleshooting?
@@ -38,6 +42,18 @@ What system are you troubleshooting?
 Once the user answers, load the corresponding OS profile from the "OS-specific profiles" section below. **All** subsequent diagnostics use that profile's commands, log paths, and problem-category queries.
 
 If the user doesn't specify, default to Linux (systemd) and note the assumption.
+
+### 2. Offer to scan behavioral rules for negations and duplicates
+
+If the user has the `positive-framing` skill available, offer to scan their behavioral instructions for negations and duplicates:
+
+```
+I can also scan your behavioral instructions (memory blocks, skills, preferences)
+for negations that leak concepts and duplicate rules across files. This uses the
+positive-framing skill's scan and /prune functionality. Run scan now? (y/n)
+```
+
+If yes, invoke the positive-framing skill's first-run scan process. This ensures all rules that guide the troubleshooting session use positive framing (preventing concept leakage) and have zero duplicates (preventing conflicting signals).
 
 ## Core methodology: Root-cause chain
 
