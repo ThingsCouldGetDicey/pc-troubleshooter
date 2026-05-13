@@ -9,19 +9,19 @@ A root-cause diagnostic skill for **any** PC system. Use when the user reports a
 
 ## What this skill solves
 
-LLMs troubleshooting PC problems tend to make the same mistakes:
+LLMs troubleshooting PC problems tend to make the same mistakes. This skill corrects each one:
 
-1. **Stopping at the first plausible explanation.** "Your mouse disconnected? Must be a Bluetooth issue." — without checking whether the Bluetooth daemon was stalled by something else entirely. The skill forces chain reasoning: keep asking "why?" until nothing deeper explains it.
+1. **Stopping at the first plausible explanation.** "Your mouse disconnected? Must be a Bluetooth issue." — without checking whether the Bluetooth daemon was stalled by something else entirely. **Correct approach**: Keep asking "why?" until nothing deeper explains it.
 
-2. **Suggesting patches that don't address the actual issue.** "Apply this BlueZ patch" — when the patch fixes an error message for stock configs, but the user has custom values that are already working. The skill requires verifying the fix actually changes the running state, not just the config file.
+2. **Suggesting patches that leave the actual issue unchanged.** "Apply this BlueZ patch" — when the patch fixes an error message for stock configs, but the user has custom values that are already working. **Correct approach**: Verify the fix actually changes the running state, not just the config file. Only suggest fixes that address the specific mechanism causing the problem.
 
-3. **Treating correlation as causation.** "The mouse disconnected and btrfs was running" — without proving the btrfs operation was running DURING the disconnect, or that the disconnect was caused by the stall rather than happening at the same time. The skill requires a smoking gun: evidence that directly proves causation.
+3. **Treating correlation as causation.** "The mouse disconnected and btrfs was running" — without proving the btrfs operation was running DURING the disconnect. **Correct approach**: Require a smoking gun — evidence that directly proves causation.
 
-4. **Applying workarounds and calling them fixes.** "Disable quotas" — when the real fix is to make quotas work correctly so the system is protected against ALL I/O stall sources, not just one. The skill distinguishes containment from structural fixes.
+4. **Applying workarounds and calling them fixes.** "Disable quotas" — when the real fix is to make quotas work correctly so the system is protected against ALL I/O stall sources. **Correct approach**: Distinguish containment from structural fixes. A fix that removes a feature to avoid a bug is containment.
 
-5. **Not checking if the fix survives reality.** A patched binary gets overwritten by the next package update. A config change doesn't take effect until a service restart. A per-device setting gets overridden by the peripheral's preferences on reconnection. The skill requires verifying the fix is actually active, not just written to a file.
+5. **Assuming a config change is active without verifying.** A patched binary gets overwritten by the next package update. A config change requires a service restart. A per-device setting gets overridden by the peripheral's preferences on reconnection. **Correct approach**: Verify the fix is actually active in the running system, not just written to a file.
 
-6. **Narrow focus on the symptom component.** "Mouse disconnected → check Bluetooth" — when the real cause is a filesystem operation stalling the entire I/O subsystem. The skill forces tangential investigation: check what ELSE was happening when the symptom occurred.
+6. **Narrow focus on the symptom component.** "Mouse disconnected → check Bluetooth" — when the real cause is a filesystem operation stalling the entire I/O subsystem. **Correct approach**: Check what ELSE was happening when the symptom occurred. Investigate tangentially.
 
 ## First run: System identification
 
@@ -43,7 +43,7 @@ If the user doesn't specify, default to Linux (systemd) and note the assumption.
 
 **This is the primary operating principle. Everything else is subordinate.**
 
-When a symptom appears, do NOT stop at the first explanation. Chase the causal chain by repeatedly asking "why?" until you reach the true root cause — the thing that changed, broke, or is misconfigured that triggers the entire chain.
+When a symptom appears, chase the causal chain by repeatedly asking "why?" until you reach the true root cause — the thing that changed, broke, or is misconfigured that triggers the entire chain.
 
 ### The chain loop
 
@@ -58,10 +58,10 @@ When a symptom appears, do NOT stop at the first explanation. Chase the causal c
 
 ### Rules for the chain
 
-- **Never stop at a symptom and call it a cause.** "BlueZ returns 0x0E" is a symptom. "Why does BlueZ return 0x0E now when it didn't last week?" is the chain.
+- **Treat every symptom as a chain starter, not a conclusion.** "BlueZ returns 0x0E" is a symptom. "Why does BlueZ return 0x0E now when it didn't last week?" is the chain.
 - **Ask why something changed.** If it worked before and doesn't now, something changed. Find what changed. That's usually the root cause.
-- **Look tangentially.** The cause may not be in the obvious component. A Bluetooth mouse disconnecting might be caused by a filesystem rescan stalling the I/O subsystem — the mouse is just the canary.
-- **Distinguish "has always been this way" from "this is new behaviour".** If the system has always treated an error as fatal, then the error isn't new — what's new is that the device is now hitting that code path. Why?
+- **Look tangentially.** The cause may be outside the obvious component. A Bluetooth mouse disconnecting might be caused by a filesystem rescan stalling the I/O subsystem — the mouse is just the canary.
+- **Distinguish "has always been this way" from "this is new behaviour".** If the system has always treated an error as fatal, then the error isn't new — what's new is that the device is now hitting that code path. Chase the change.
 - **Keep going until the chain terminates.** The chain terminates when you reach:
   - A config change that explains the new behaviour
   - A package/driver/OS update that introduced a regression
@@ -104,7 +104,7 @@ This is the hardest part. You need to show that the stall **directly caused** th
 **For peripheral/input issues:**
 - USB devices are kernel-polled — they survive most userspace stalls.
 - Bluetooth devices depend on a userspace daemon (bluetoothd on Linux, bluetoothd on macOS, Bluetooth Support Service on Windows) — if the daemon stalls, the device dies.
-- This explains "my USB keyboard works but my Bluetooth mouse doesn't" — the keyboard doesn't need the stalled daemon.
+- This explains "my USB keyboard works but my Bluetooth mouse doesn't" — the keyboard survives because it bypasses the stalled daemon.
 
 **For network issues:**
 - Check if the network stack is kernel-level (survives stalls) or userspace (vulnerable).
@@ -164,39 +164,39 @@ Smoking gun: KDE Connect D-Bus timeout at 23:06:08 (bluetoothd not responding)
 
 ## Exhaustive elimination
 
-Before proposing a fix, exhaust all alternative explanations. A fix that addresses one possible cause but leaves others unexplored is not a fix — it's a gamble.
+Before proposing a fix, exhaust all alternative explanations. A fix that addresses one possible cause but leaves others unexplored is a gamble, not a fix.
 
 **The elimination checklist:**
 
-For every proposed root cause, ask:
+For every proposed root cause, answer all five:
 
 1. **Does this explain ALL observed symptoms?** If the mouse disconnects AND the keyboard works, the fix must explain why USB survived but Bluetooth didn't. If it can't, the fix is incomplete.
 
-2. **Does this explain the timing?** If the problem happens at 23:06, the proposed cause must have been active at 23:06. Not "around that time" — actually at that time. Use log timestamps to prove it.
+2. **Does this explain the timing?** If the problem happens at 23:06, the proposed cause must have been active at 23:06. Use log timestamps to prove it.
 
-3. **Are there alternative explanations that haven't been ruled out?** List them explicitly. For each one, state what evidence would confirm or rule it out. Then go get that evidence.
+3. **Have all alternative explanations been ruled out?** List them explicitly. For each one, state what evidence would confirm or rule it out. Then go get that evidence.
 
-4. **If I apply this fix, will the problem definitely not recur?** If the answer is "probably not" or "it should help," the fix is not structural. A structural fix eliminates the entire class of problem, not just one instance.
+4. **If I apply this fix, will the problem definitely stay solved?** If the answer is "probably not" or "it should help," the fix is containment, not structural. A structural fix eliminates the entire class of problem, not just one instance.
 
-5. **Am I fixing the actual mechanism, or just changing a setting that happens to help?** Disabling quotas prevents the qgroup rescan trigger, but doesn't prevent OTHER I/O stalls from causing the same symptom. The structural fix is to make the system resilient against I/O stalls (e.g., ensuring userspace daemons don't die when the I/O subsystem stalls).
+5. **Am I fixing the actual mechanism, or just changing a setting that happens to help?** Disabling quotas prevents the qgroup rescan trigger, but leaves the system vulnerable to OTHER I/O stalls causing the same symptom. The structural fix is to make the system resilient against I/O stalls (e.g., ensuring userspace daemons recover from I/O pressure).
 
 **Example: the quota disable mistake**
 
 ```
 Problem: btrfs qgroup rescan stalls the system → bluetoothd dies → mouse disconnects
-Wrong fix: "Disable quotas" — prevents THIS trigger but not OTHER I/O stall sources
-  (btrfs balance, scrub, heavy backup, updatedb, etc.)
-Right fix: "Re-enable quotas AND fix the snapper-cleanup that leaves the
+Containment: "Disable quotas" — prevents THIS trigger but leaves OTHER I/O stall sources
+  (btrfs balance, scrub, heavy backup, updatedb, etc.) able to cause the same symptom
+Structural fix: "Re-enable quotas AND fix the snapper-cleanup that leaves the
   inconsistency flag AND fix the limine-snapper-sync regression that
   prevented cleanup from completing AND ensure I/O-heavy operations
   run at idle priority AND verify bluetoothd recovers from I/O stalls"
 ```
 
-A fix that disables a feature to avoid a bug is a workaround, not a fix. The feature (quotas) exists for a reason. The fix should make the feature work correctly, not remove it.
+A fix that disables a feature to avoid a bug is containment, not a fix. The feature (quotas) exists for a reason. The fix should make the feature work correctly, not remove it.
 
-## No workarounds
+## Structural fixes only
 
-**Workarounds are never the fix.** A workaround masks the symptom without addressing the root cause. Examples of things that are NOT fixes:
+**Every proposed fix must address the mechanism, not just avoid the trigger.** Examples of containment (acceptable as temporary measures only):
 
 - Disabling a feature to avoid a bug (disabling quotas, disabling hardware acceleration)
 - Forcing a fallback path instead of fixing the primary path
@@ -205,10 +205,10 @@ A fix that disables a feature to avoid a bug is a workaround, not a fix. The fea
 - Disabling a service that's interfering instead of fixing the interference
 - Patching a binary without verifying the patch actually changes the running behavior
 
-Workarounds are acceptable ONLY as temporary containment while the root cause is being fixed, and must be labelled:
+Containment is acceptable ONLY as a temporary measure while the structural fix is being implemented, and must be labelled:
 
 ```
-contained pending root cause — workaround: [description] — root cause still open
+contained pending structural fix — containment: [description] — root cause still open
 ```
 
 ## The fix report
@@ -257,29 +257,29 @@ Consulted:
 
 ### 7. Prevent recurrence
 
-Before closing the branch, verify the fix is structural — not patchwork that will regress on the next update. Check:
+Before closing the branch, verify the fix is structural — it will survive updates, reboots, and reconnections. Check:
 
 **Will the fix survive a package/driver/OS update?**
 - If you patched a binary: it will be overwritten. Create a pacman hook, apt trigger, launchd daemon, or scheduled task to re-apply after updates.
-- If you edited a config: check if the package manager preserves user modifications (pacman creates `.pacnew`, apt creates `.dpkg-dist`, etc.)
-- If you changed a kernel module parameter: check if `initramfs` or `dracut` needs rebuilding, and if the module config survives kernel updates.
+- If you edited a config: verify the package manager preserves user modifications (pacman creates `.pacnew`, apt creates `.dpkg-dist`, etc.)
+- If you changed a kernel module parameter: verify `initramfs` or `dracut` is rebuilt, and the module config survives kernel updates.
 
 **Will the fix survive a reboot?**
-- Check if the change is persisted to disk (not just in-memory).
-- Check if the service that applies the change starts at boot.
-- Check if the change depends on a volatile state (e.g., a device address that changes after deep sleep).
+- Verify the change is persisted to disk (not just in-memory).
+- Verify the service that applies the change starts at boot.
+- Verify the change is independent of volatile state (e.g., a device address that changes after deep sleep).
 
 **Will the fix survive a reconnection?**
-- For peripherals: check if the device's preferred connection parameters (PPCP) override your config on reconnection.
-- For network devices: check if DHCP or 802.1X re-authentication resets your config.
-- For USB devices: check if the device re-enumerates with different settings after suspend/resume.
+- For peripherals: verify the device's preferred connection parameters (PPCP) are compatible with your config after reconnection.
+- For network devices: verify DHCP or 802.1X re-authentication preserves your config.
+- For USB devices: verify the device re-enumerates with the same settings after suspend/resume.
 
 **Could the same class of problem recur from a different trigger?**
-- If the root cause was "I/O stall killed a userspace daemon", disabling one I/O source doesn't prevent OTHER I/O sources from causing the same stall. Check for: scheduled balance, scrub, trim, backup, indexing, or update jobs that could cause heavy I/O.
-- If the root cause was "aggressive timeout on a peripheral", fixing one timeout doesn't prevent other peripherals from having the same issue. Check all connected devices.
-- If the root cause was "a feature was misconfigured", disabling the feature is not a fix. Fix the misconfiguration so the feature works correctly.
+- If the root cause was "I/O stall killed a userspace daemon", disabling one I/O source leaves OTHER I/O sources able to cause the same stall. Check for: scheduled balance, scrub, trim, backup, indexing, or update jobs that could cause heavy I/O.
+- If the root cause was "aggressive timeout on a peripheral", fixing one timeout leaves other peripherals potentially affected. Check all connected devices.
+- If the root cause was "a feature was misconfigured", fix the misconfiguration so the feature works correctly. Removing the feature is containment.
 
-**Verify the fix is actually active — not just written to a file:**
+**Verify the fix is actually active — confirm running state matches config:**
 
 | OS | What to verify |
 |----|---------------|
@@ -293,9 +293,9 @@ Present the report and ask: "Should I apply this fix?"
 
 ## Known fixes registry
 
-These are fixes for common upstream bugs that affect multiple users. They're not workarounds — they're actual code fixes that haven't been released in a package yet, or package-level patches that need re-application after updates.
+These are fixes for common upstream bugs that affect multiple users. They're actual code fixes that haven't been released in a package yet, or package-level patches that need re-application after updates.
 
-**Important**: Before suggesting any fix from this registry, verify it actually applies to the user's situation. A fix that addresses an error message but doesn't change the running behavior is not a fix — it's cosmetic.
+**Before suggesting any fix from this registry, verify it actually applies to the user's situation.** A fix that addresses an error message but leaves the running behavior unchanged is cosmetic, not structural.
 
 ### BlueZ 5.86: "Failed to set default system config for hci0"
 
@@ -303,7 +303,7 @@ These are fixes for common upstream bugs that affect multiple users. They're not
 
 **Root cause**: Commit `5e5b46c5c0cc` ("adapter: Do not send empty default system parameter list") changed the behavior so that when no config changes are needed, BlueZ skips the MGMT command. But when the config list is empty (stock config), the code jumps to `done:` which leaks the list and logs an error, instead of returning cleanly.
 
-**Scope**: This bug ONLY affects systems with a stock (empty) `main.conf`. If you have custom values in `main.conf` (e.g., `LE.ConnectionSupervisionTimeout=2000`), the MGMT command IS sent and the adapter defaults ARE applied. The error message does NOT appear with custom values. **Do not suggest this patch for users who already have custom main.conf values — it won't change their running behavior.**
+**Scope**: This bug ONLY affects systems with a stock (empty) `main.conf`. If you have custom values in `main.conf` (e.g., `LE.ConnectionSupervisionTimeout=2000`), the MGMT command IS sent and the adapter defaults ARE applied. The error message is absent with custom values. **Only suggest this patch for users with stock main.conf — it leaves the running behavior unchanged for users with custom values.**
 
 **Fix**: Commit `46937fd` ("adapter: Fix 'Failed to set default system config' startup warning") — frees the list and returns instead of jumping to `done:`.
 
@@ -351,11 +351,11 @@ Exec = /usr/local/bin/bluez-repatch.sh
 ```
 
 **Verification**: After applying, check:
-- `journalctl -u bluetooth | grep "Failed to set default system config"` — should NOT appear
+- `journalctl -u bluetooth | grep "Failed to set default system config"` — should be absent
 - `cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout` — should match main.conf value
 - **Critical**: Verify the actual running connection params, not just the adapter defaults. Check per-device params in `/var/lib/bluetooth/<adapter>/<device>/info` — these may differ from the adapter defaults if the peripheral's PPCP overrides them.
 
-**Affected versions**: BlueZ 5.86 (confirmed). Fixed in upstream git (commit 46937fd). Not yet in a release package as of 2026-05-13.
+**Affected versions**: BlueZ 5.86 (confirmed). Fixed in upstream git (commit 46937fd). Awaiting release package as of 2026-05-13.
 
 ## OS-specific profiles
 
@@ -820,7 +820,7 @@ Before persistent fixes, consult the relevant documented layer:
 - Service daemon docs
 - Upstream release notes/issues
 
-Use local hacks only when documented methods fail, the reason is explained, and rollback exists.
+Use local hacks only when documented methods fail, with the reason explained and rollback in place.
 
 ## Upstream bug freshness
 
@@ -832,31 +832,31 @@ When using GitHub/GitLab/upstream issues as evidence, check freshness:
 - explicitly unresolved
 - linked from current release notes or known-issues pages
 
-## Containment is not closure
+## Containment is temporary
 
-Do not close a branch just because a workaround avoids the symptom.
+Close a branch only when the structural fix is in place. A containment measure alone is an open branch:
 
 ```
-contained pending root cause — workaround: [description]
+contained pending structural fix — containment: [description] — root cause still open
 ```
 
-## No fake closure
+## Branch closure conditions
 
 A branch can close only when:
 
-- root cause confirmed and fixed
+- root cause confirmed and structurally fixed
 - root cause ruled out
 - branch proven unrelated
 - branch accepted as permanent containment by the user
 - branch blocked with exact resume condition
 
-## Official directions / no improvisation rule
+## Official directions / verified-only rule
 
-1. Do not improvise or guess.
-2. Prefer trusted sources: official docs → upstream docs → installed help → local verification → clearly-labelled inference.
-3. For UI navigation: check docs first, inspect installed version if possible, say UNKNOWN if not verified.
+1. Prefer verified information over improvisation.
+2. Source hierarchy: official docs → upstream docs → installed help → local verification → clearly-labelled inference.
+3. For UI navigation: check docs first, inspect installed version if possible, say UNKNOWN if unverified.
 4. For scripts: use documented mechanisms, preserve backups, log what was touched.
-5. If trusted documentation cannot be found: state UNKNOWN, explain what is known, provide safest verification path.
+5. If trusted documentation is unavailable: state UNKNOWN, explain what is known, provide safest verification path.
 
 ## Integration model
 
