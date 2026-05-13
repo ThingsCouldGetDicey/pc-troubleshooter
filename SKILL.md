@@ -194,8 +194,97 @@ Consulted:
 - [source] — [what it confirmed / what was found]
 ```
 
-### 6. Ask to continue
+### 6. Prevent recurrence
+
+Before closing the branch, verify the fix is structural — not patchwork that will regress on the next update. Check:
+
+**Will the fix survive a package/driver/OS update?**
+- If you patched a binary: it will be overwritten. Create a pacman hook, apt trigger, launchd daemon, or scheduled task to re-apply after updates.
+- If you edited a config: check if the package manager preserves user modifications (pacman creates `.pacnew`, apt creates `.dpkg-dist`, etc.)
+- If you changed a kernel module parameter: check if `initramfs` or `dracut` needs rebuilding, and if the module config survives kernel updates.
+
+**Will the fix survive a reboot?**
+- Check if the change is persisted to disk (not just in-memory).
+- Check if the service that applies the change starts at boot.
+- Check if the change depends on a volatile state (e.g., a device address that changes after deep sleep).
+
+**Could the same class of problem recur from a different trigger?**
+- If the root cause was "I/O stall killed a userspace daemon", disabling one I/O source (quotas, cleanup) doesn't prevent OTHER I/O sources from causing the same stall. Check for: scheduled balance, scrub, trim, backup, indexing, or update jobs that could cause heavy I/O.
+- If the root cause was "aggressive timeout on a peripheral", fixing one timeout doesn't prevent other peripherals from having the same issue. Check all connected devices.
+
+**Regression check commands:**
+
+| OS | What to run after applying the fix |
+|----|-----------------------------------|
+| Linux (systemd) | Verify the fix is in the actual running config (not just the file): `cat` the config, check `sysfs`/`debugfs`, check `bluetoothctl info`, check `journalctl -b` for the error message returning. Check if the patched binary matches what's on disk: `md5sum` or `pacman -Qk`. Check `pacman -Q` for version changes. |
+| Linux (non-systemd) | Same verification approach using `/var/log/messages`, `dmesg`, service status. |
+| macOS | `log show` for the error message returning. `launchctl print` for service config. `system_profiler` for device state. |
+| Windows | `Get-WinEvent` for the error returning. `Get-Service` for service state. `Get-PnpDevice` for device state. |
+
+### 7. Ask to continue
 Present the report and ask: "Should I apply this fix?"
+
+## Known fixes registry
+
+These are fixes for common upstream bugs that affect multiple users. They're not workarounds — they're actual code fixes that haven't been released in a package yet, or package-level patches that need re-application after updates.
+
+### BlueZ 5.86: "Failed to set default system config for hci0"
+
+**Bug**: BlueZ 5.86 cannot set the adapter's default connection parameters from `main.conf`. This means `LE.ConnectionSupervisionTimeout`, `LE.ConnectionLatency`, and `LE.MaxConnectionInterval` in `/etc/bluetooth/main.conf` are **silently ignored**. The peripheral's own preferred connection parameters (PPCP) are used instead, which may be too aggressive for reliable operation.
+
+**Root cause**: Commit `5e5b46c5c0cc` ("adapter: Do not send empty default system parameter list") changed the behavior so that when no config changes are needed, BlueZ skips the MGMT command. But when the config list is empty (stock config), the code jumps to `done:` which leaks the list and logs an error, instead of returning cleanly.
+
+**Fix**: Commit `46937fd` ("adapter: Fix 'Failed to set default system config' startup warning") — frees the list and returns instead of jumping to `done:`.
+
+**Patch** (apply to `src/adapter.c` in the bluez source):
+```diff
+@@ -4963,8 +4963,11 @@ static void load_defaults(struct btd_adapter *adapter)
+ 	if (!load_le_defaults(adapter, list, &btd_opts.defaults.le))
+ 		goto done;
+ 
+-	if (mgmt_tlv_list_size(list) == 0)
+-		goto done;
++	/* No changes from defaults */
++	if (mgmt_tlv_list_size(list) == 0) {
++		mgmt_tlv_list_free(list);
++		return;
++	}
+ 
+ 	err = mgmt_send_tlv(adapter->mgmt, MGMT_OP_SET_DEF_SYSTEM_CONFIG,
+ 			adapter->dev_id, list, NULL, NULL, NULL);
+```
+
+**How to apply on Arch/CachyOS**:
+1. Get the package source: `pacman -S --needed asp && asp checkout bluez`
+2. Add the patch to the PKGBUILD's `source` array
+3. Add the patch to the `prepare()` function
+4. Build: `makepkg -sf`
+5. Install: `sudo pacman -U bluez-5.86-*.pkg.tar.zst`
+6. Restart: `sudo systemctl restart bluetooth`
+
+**Persistence**: Create a pacman hook to re-apply after updates:
+```
+/etc/pacman.d/hooks/bluez-patch.hook
+```
+```ini
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = bluez
+
+[Action]
+Description = Re-applying BlueZ default system config patch
+When = PostTransaction
+Exec = /usr/local/bin/bluez-repatch.sh
+```
+
+**Verification**: After applying, check:
+- `journalctl -u bluetooth | grep "Failed to set default system config"` — should NOT appear
+- `cat /sys/kernel/debug/bluetooth/hci0/supervision_timeout` — should match main.conf value
+- `bluetoothctl info <addr>` — per-device params should match main.conf, not the peripheral's PPCP
+
+**Affected versions**: BlueZ 5.86 (confirmed). Fixed in upstream git (commit 46937fd). Not yet in a release package as of 2026-05-13.
 
 ## OS-specific profiles
 
